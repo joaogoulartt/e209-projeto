@@ -2,7 +2,8 @@
 
 #define FOSC 16000000U // ClockSpeed
 #define BAUD 9600
-#define MYUBRR FOSC / 16 / BAUD - 1
+#define MYUBRR FOSC / 16 / (BAUD - 1)
+#define SIZE 3
 
 #define SENSOR (1<<PD2)
 #define MOTOR (1<<PD6)
@@ -11,7 +12,7 @@
 char msg_tx[30];
 char msg_rx[32];
 int pos_msg_rx = 0;
-int tamanho_msg_rx = 1;
+int tamanho_msg_rx = SIZE;
 unsigned int volume = 300;
 unsigned int tempo = 180;
 float ideal_flow = 0;
@@ -23,22 +24,83 @@ int total_cont = 0;
 int step = 0;
 int firstPrint = 0;
 
-void UART_config(unsigned int ubrr) {
-  UBRR0H = (unsigned char)(ubrr >> 8);
-  UBRR0L = (unsigned char)ubrr;
-  // Habilita a recepcao, tranmissao e interrupcao na recepcao
-  UCSR0B = (1 << RXEN0) | (1 << TXEN0) | (1 << RXCIE0);
-  // Configura o formato da mensagem: 8 bits de dados e 1bits de stop
-  UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
+void UART_config(unsigned int ubrr);
+void UART_Transmit(char *dados);
+void UART_printFloat(float value);
+void msg_rx_reset();
+void ADC_config(void);
+int ADC_read(u8 ch);
+float get_voltage(u8 ch);
+void PWM_config();
+void INT_config();
+void TIMER_config();
+void TIMER_start();
+void TIMER_stop();
+void alarmState();
+void get_ideal_flow();
+void get_real_flow();
+void get_error();
+void setup_volume();
+void setup_timer();
+void setup_motor();
+void start_infusion();
+
+int main() {
+  msg_rx_reset();
+
+  DDRD = MOTOR + ALARME;
+
+  PORTD &= ~(MOTOR + ALARME);
+
+  UART_config(MYUBRR);
+  ADC_config();
+  PWM_config();
+  INT_config();
+  TIMER_config();
+  sei();
+
+  step = 0;
+  while (1)
+  {
+    switch (step)
+    {
+      case 0:
+        setup_volume();
+        break;
+      case 1:
+        setup_timer();
+      case 2:
+        setup_motor();
+        break;
+      case 3:
+        start_infusion();
+        break;
+    }
+  }
+
+  return 0;
 }
 
-void UART_transmit(char* dados) {
+
+void UART_config(unsigned int ubrr) {
+  // Configura a  baud rate
+  UBRR0H = (unsigned char)(ubrr >> 8);
+  UBRR0L = (unsigned char)ubrr;
+  // Habilita a recepcao, tranmissao e interrupcao na recepcao */
+  UCSR0B = ((1 << RXCIE0) + (1 << RXEN0) + (1 << TXEN0));
+  // Configura o formato da mensagem: 8 bits de dados e 1 bits de stop */
+  UCSR0C = ((1 << UCSZ01) + (1 << UCSZ00));
+}
+
+// Transmissão de Dados Serial
+void UART_Transmit(char *dados)
+{
   // Envia todos os caracteres do buffer dados ate chegar um final de linha
   while (*dados != 0)
   {
-    // Aguarda a transmissão acabar
-    while (!(UCSR0A & (1 << UDRE0)))
-      ;
+    while ((UCSR0A & (1 << UDRE0)) == 0)
+      ; // Aguarda a transmissão acabar
+
     // Escreve o caractere no registro de tranmissão
     UDR0 = *dados;
     // Passa para o próximo caractere do buffer dados
@@ -49,16 +111,13 @@ void UART_transmit(char* dados) {
 void UART_printFloat(float value) {
   char buffer[20];
   dtostrf(value, 0, 2, buffer);
-  UART_transmit(buffer);
+  UART_Transmit(buffer);
 }
 
-ISR(USART_RX_vect) {
-  // Le o dado recebido e coloca no buffer
-  msg_rx[pos_msg_rx++] = UDR0;
-
-  // Se o dado recebido for um final de linha, seta a flag de string recebida
-  if (pos_msg_rx == tamanho_msg_rx)
-    pos_msg_rx = 0;
+void msg_rx_reset() {
+  for (int i = 0; i < 32; i++) {
+    msg_rx[i] = 0;
+  }
 }
 
 void ADC_config(void)
@@ -148,7 +207,7 @@ void alarmState() {
   if (voltage < 0.5) {
     PORTD |= ALARME;
     PORTD &= ~MOTOR;
-    UART_transmit("Bolha na tubulacao \n");
+    UART_Transmit("Bolha na tubulacao \n");
   }
   else {
     PORTD &= ~ALARME;
@@ -167,18 +226,36 @@ void get_real_flow() {
 void get_error() {
   get_real_flow();
   float error = ((real_flow - ideal_flow) / ideal_flow) * 100.00;
-  UART_transmit("Erro: ");
+  UART_Transmit("Erro: ");
   UART_printFloat(error);
-  UART_transmit("\n");
+  UART_Transmit("\n");
 }
 
 void setup_volume() {
-  UART_transmit("Digite o volume desejado, em ml: \n");
+  UART_Transmit("Digite o volume desejado, em ml: \n");
+
+  while (msg_rx[0] == 0 && msg_rx[1] == 0 && msg_rx[2] == 0); // Wait for user input
+
+  char vol[3] = {msg_rx[0], msg_rx[1], msg_rx[2]};
+  volume = atoi(vol);
+
+  // Reset msg_rx
+  msg_rx_reset();
+  
   step++;
 }
 
 void setup_timer() {
-  UART_transmit("Digite o tempo de infusao, em segundos: \n");
+  UART_Transmit("Digite o tempo de infusao, em minutos: \n");
+
+  while (msg_rx[0] == 0 && msg_rx[1] == 0 && msg_rx[2] == 0); // Wait for user input
+
+  char time[3] = {msg_rx[0], msg_rx[1], msg_rx[2]};
+  tempo = atoi(time);
+
+  // Reset msg_rx
+  msg_rx_reset();
+
   step++;
 }
 
@@ -191,7 +268,7 @@ void setup_motor() {
   motor_power = int(power_percentage * 255);
 
   step++;
-  UART_transmit("Iniciando infusao... \n");
+  UART_Transmit("Iniciando infusao... \n");
 }
 
 void start_infusion() {
@@ -199,38 +276,18 @@ void start_infusion() {
   alarmState();
 }
 
-int main() {
-  DDRD = MOTOR + ALARME;
+// Interrupção de Recebimento da Serial
+ISR(USART_RX_vect)
+{
+  // Escreve o valor recebido pela UART na posição pos_msg_rx do buffer msg_rx
+  msg_rx[pos_msg_rx++] = UDR0;
 
-  PORTD &= ~(MOTOR + ALARME);
-
-  UART_config(MYUBRR);
-  ADC_config();
-  PWM_config();
-  INT_config();
-  TIMER_config();
-  sei();
-
-  step = 0;
-  while (1)
+  if (pos_msg_rx == tamanho_msg_rx)
   {
-    switch (step)
-    {
-      case 0:
-        setup_volume();
-        break;
-      case 1:
-        setup_timer();
-      case 2:
-        setup_motor();
-        break;
-      case 3:
-        start_infusion();
-        break;
-    }
+    pos_msg_rx = 0;
   }
 
-  return 0;
+  _delay_ms(500);
 }
 
 ISR(INT0_vect) {
