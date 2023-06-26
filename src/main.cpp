@@ -8,10 +8,10 @@
 #define MOTOR (1<<PD6)
 #define ALARME (1<<PD7)
 
-char msg_tx[20];
+char msg_tx[30];
 char msg_rx[32];
-uint8_t pos_msg_rx = 0;
-uint8_t tamanho_msg_rx = 3;
+int pos_msg_rx = 0;
+int tamanho_msg_rx = 1;
 unsigned int volume = 300;
 unsigned int tempo = 180;
 float ideal_flow = 0;
@@ -20,6 +20,8 @@ int motor_power = 0;
 int btn_cont = 0;
 int cont = 0;
 int total_cont = 0;
+int step = 0;
+int firstPrint = 0;
 
 void UART_config(unsigned int ubrr) {
   UBRR0H = (unsigned char)(ubrr >> 8);
@@ -53,11 +55,10 @@ void UART_printFloat(float value) {
 ISR(USART_RX_vect) {
   // Le o dado recebido e coloca no buffer
   msg_rx[pos_msg_rx++] = UDR0;
+
   // Se o dado recebido for um final de linha, seta a flag de string recebida
   if (pos_msg_rx == tamanho_msg_rx)
-  {
     pos_msg_rx = 0;
-  }
 }
 
 void ADC_config(void)
@@ -126,20 +127,20 @@ void INT_config() {
 void TIMER_config() {
   TCCR2A = (1 << WGM21); // Configuração do modo de funcionamento para Comparador
   TCCR2B = (1 << CS21);  // Pre-scaler de 8 (Frequência de 2MHz - Período de 500 ns em cada contagem)
-  OCR2A = 199;           // 200 contagens de 500 ns, o que gera uma interrupção a cada 100 us 
+  OCR2A = 199;           // 200 contagens de 500 ns, o que gera uma interrupção a cada 100 us
 }
 
 void TIMER_start()
 {
-    TIMSK2 = (1 << OCIE2A); // Gerar uma interrupção no estouro do comparador A
+  TIMSK2 = (1 << OCIE2A); // Gerar uma interrupção no estouro do comparador A
 }
 
 void TIMER_stop()
 {
-    TIMSK2 = 0; // Desabilita a interrupção do Timer2
-    total_cont = cont;
-    cont = 0;
-    get_error();
+  TIMSK2 = 0; // Desabilita a interrupção do Timer2
+  total_cont = cont;
+  cont = 0;
+  get_error();
 }
 
 void alarmState() {
@@ -158,17 +159,27 @@ void get_ideal_flow() {
   ideal_flow = volume / (tempo / 60.0);
 }
 
-void get_real_flow(){
-  float seconds = total_cont / 10;
-  real_flow = (2/(seconds/3600)) * 0.05;
+void get_real_flow() {
+  float seconds = total_cont / 10000.00;
+  real_flow = (2 / (seconds / 3600)) * 0.05;
 }
 
-void get_error(){
+void get_error() {
   get_real_flow();
-  float error = ((real_flow - ideal_flow)/ideal_flow)*100.00;
+  float error = ((real_flow - ideal_flow) / ideal_flow) * 100.00;
   UART_transmit("Erro: ");
   UART_printFloat(error);
   UART_transmit("\n");
+}
+
+void setup_volume() {
+  UART_transmit("Digite o volume desejado, em ml: \n");
+  step++;
+}
+
+void setup_timer() {
+  UART_transmit("Digite o tempo de infusao, em segundos: \n");
+  step++;
 }
 
 void setup_motor() {
@@ -178,6 +189,14 @@ void setup_motor() {
   power_percentage = (ideal_flow / 450) * 100.0;
 
   motor_power = int(power_percentage * 255);
+
+  step++;
+  UART_transmit("Iniciando infusao... \n");
+}
+
+void start_infusion() {
+  OCR0A = motor_power;
+  alarmState();
 }
 
 int main() {
@@ -192,30 +211,40 @@ int main() {
   TIMER_config();
   sei();
 
+  step = 0;
   while (1)
   {
-    setup_motor();
-    OCR0A = motor_power;
-    alarmState();
-    _delay_ms(300);
+    switch (step)
+    {
+      case 0:
+        setup_volume();
+        break;
+      case 1:
+        setup_timer();
+      case 2:
+        setup_motor();
+        break;
+      case 3:
+        start_infusion();
+        break;
+    }
   }
+
   return 0;
 }
 
 ISR(INT0_vect) {
-  if(btn_cont == 0){
-    UART_transmit("CLICK 0");
+  if (btn_cont == 0) {
+    TIMER_start();
     btn_cont++;
-    //TIMER_start();
   }
-  else{
-    UART_transmit("CLICK 1");
+  else {
+    TIMER_stop();
     btn_cont--;
-    //TIMER_stop();
   }
 }
 
 ISR(TIMER2_COMPA_vect) // Rotina de interrupção do Timer 2
 {
-    cont++;
+  cont++;
 }
